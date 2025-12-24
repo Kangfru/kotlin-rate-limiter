@@ -1,14 +1,9 @@
 package com.kangfru.kotlinratelimiter.storage
 
-import java.time.Instant
+import com.kangfru.kotlinratelimiter.domain.RateLimitState
 
 interface RateLimitStorage{
-    suspend fun get(key: String): TokenBucketState?
-    suspend fun save(key: String, state: TokenBucketState)
+    suspend fun get(key: String): RateLimitState?
+    suspend fun save(key: String, state: RateLimitState)
     suspend fun delete(key: String)
 }
-
-data class TokenBucketState(
-    val tokens: Double,
-    val lastRefillTime: Instant
-)

@@ -1,6 +1,6 @@
 # kotlin-rate-limiter
 ## 개요
-Kotlin 기반의 Rate Limiter 학습용 라이브러리로, Token Bucket 알고리즘을 활용한 요청 제어(Rate Limiting) 기능을 제공한다.
+Kotlin 기반의 Rate Limiter 학습용 라이브러리로, Token Bucket, Fixed Window 등 다양한 알고리즘을 활용한 요청 제어(Rate Limiting) 기능을 제공한다.
 
 학습 목표는 Kotlin 중급~고급 기능 활용과 Rate Limiter 알고리즘에 대한 이해를 목표로 한다.
 
@@ -10,12 +10,12 @@ Rate Limiter는 특정 시간 동안 허용되는 요청의 수를 제한하는 
 
 ### 사용 시나리오
 
-**Server-side Rate Limiting (API 제공자)**
+**Server-side Rate Limiting**
 - 사용자별/IP별로 API 요청 수 제한
 - 분당 100회, 시간당 1000회 등의 정책 적용
 - API abuse 방지 및 서버 보호
 
-**Client-side Rate Limiting (API 소비자)**
+**Client-side Rate Limiting**
 - 외부 API 호출 시 상대방의 rate limit 준수
 - 429 Too Many Requests 에러 방지
 - 배치 작업에서 대량 API 호출 시 속도 조절
@@ -47,7 +47,7 @@ Token Bucket은 Rate Limiting을 구현하는 대표적인 알고리즘 중 하�
 ### 동작 원리
 
 ```kotlin
-// 설정: 100 requests per minute~~~~
+// 설정: 100 requests per minute
 // Capacity: 100 tokens
 // Refill rate: 100 tokens / 60 seconds = 1.67 tokens/second
 
@@ -120,6 +120,287 @@ when (result) {
 }
 ```
 
+## Fixed Window Counter 알고리즘
+
+Fixed Window Counter는 Rate Limiting 알고리즘 중 가장 단순한 방식으로, 고정된 시간 윈도우 내에서 요청 수를 카운팅하고 제한하는 방식이다.
+
+### 핵심 개념
+
+```
+설정: 100 requests per minute
+
+Window 1: 10:00:00 ~ 10:00:59
+┌──────────────────────────────────┐
+│  Counter: 0 → 1 → 2 → ... → 100  │
+│  (최대 100개 허용)                  │
+└──────────────────────────────────┘
+
+Window 2: 10:01:00 ~ 10:01:59 (새 윈도우!)
+┌─────────────────────────────┐
+│  Counter: 0 (리셋!)          │
+│  다시 100개 허용              │
+└─────────────────────────────┘
+```
+
+**구성 요소:**
+- **Counter (카운터)**: 현재 윈도우에서 처리된 요청 수
+- **Window Start (윈도우 시작 시간)**: 현재 윈도우의 시작 시각
+- **Window Duration (윈도우 길이)**: 윈도우의 길이 (예: 1분, 1시간)
+
+### 동작 원리
+
+```kotlin
+// 설정: 100 requests per minute
+
+Timeline:
+10:00:00 ~ 10:00:59 (Window 1)
+  - 요청 1: counter = 1 ✅
+  - 요청 2: counter = 2 ✅
+  - ...
+  - 요청 100: counter = 100 ✅
+  - 요청 101: counter = 100 ❌ (limit 도달)
+
+10:01:00 (Window 2 시작)
+  - 카운터 자동 리셋! counter = 0
+  - 요청 1: counter = 1 ✅
+  - ...
+```
+
+### 수학적 계산
+
+Fixed Window의 핵심은 현재 시간을 윈도우 단위로 truncate하는 것이다.
+
+```kotlin
+// Window 시작 시간 계산 (Truncation)
+fun calculateWindowStart(now: Instant, window: Duration): Instant {
+    val epochMilli = now.toEpochMilli()
+    val windowMilli = window.toMillis()
+    val windowStartMilli = (epochMilli / windowMilli) * windowMilli
+    return Instant.ofEpochMilli(windowStartMilli)
+}
+
+// 예시 1: 1분 윈도우
+now = 10:37:42.567
+window = 60000 ms (1 minute)
+
+epochMilli = 1735039062567
+windowMilli = 60000
+windowStartMilli = (1735039062567 / 60000) * 60000
+                 = 28917317 * 60000
+                 = 1735039020000
+result = 10:37:00.000  // 분 단위로 trunc
+
+// 예시 2: 1시간 윈도우
+now = 10:37:42
+window = 3600000 ms (1 hour)
+result = 10:00:00  // 시간 단위로 trunc
+
+// 예시 3: 5분 윈도우
+now = 10:37:42
+window = 300000 ms (5 minutes)
+result = 10:35:00  // 5분 단위로 trunc (10:35:00 ~ 10:39:59)
+```
+
+### 알고리즘 흐름
+
+```kotlin
+1. 현재 시간으로 windowStart 계산
+   now = 10:37:42
+   → windowStart = 10:37:00 (1분 윈도우 기준)
+
+2. Storage에서 상태 조회
+   
+3. 상태 없음 (첫 요청):
+   → FixedWindow(counter = 1, windowStart = 10:37:00)
+   → return true
+
+4. 상태 있음:
+   a) 같은 윈도우? (state.windowStart == currentWindowStart)
+      - counter < limit?
+        YES → counter++, return true
+        NO  → return false (limit 도달)
+   
+   b) 다른 윈도우? (새 윈도우 시작)
+      → FixedWindow(counter = 1, windowStart = currentWindowStart)
+      → return true (카운터 리셋)
+```
+
+### 구현 예시
+
+```kotlin
+val storage = InMemoryStorage()
+val limiter = FixedWindowRateLimiter(storage)
+
+// 초당 10회 제한
+val result = limiter.execute(
+    key = RequestKey("user:123"),
+    config = 10.per.second
+) {
+    apiClient.fetchData()
+}
+
+when (result) {
+    is RateLimitResult.Allowed -> {
+        println("Remaining: ${result.remaining}")
+        println("Reset at: ${result.resetAt}")
+    }
+    is RateLimitResult.Denied -> {
+        println("Retry after: ${result.retryAfter}")
+    }
+    is RateLimitResult.Error -> {
+        println("Error: ${result.cause}")
+    }
+}
+```
+
+### Fixed Window의 장점
+
+**1. 구현 간단성**
+```kotlin
+// 상태 저장: 단순 카운터 + 윈도우 시작 시간
+data class FixedWindow(
+    val counter: Long,
+    val windowStart: Instant
+)
+
+// 로직: 카운터 증가 or 리셋
+if (sameWindow) {
+    counter++
+} else {
+    counter = 1  // 리셋
+}
+```
+
+**2. 메모리 효율성**
+- Token Bucket: tokens(Double) + lastRefillTime(Instant) = 16 bytes
+- Fixed Window: counter(Long) + windowStart(Instant) = 16 bytes
+- 동일하지만 계산 로직이 훨씬 간단
+
+**3. 예측 가능성**
+- 윈도우 경계가 명확함 (10:00:00 ~ 10:00:59)
+- 사용자가 언제 리셋되는지 정확히 알 수 있음
+
+**4. Redis 구현 용이**
+```redis
+# Redis에서 매우 간단하게 구현 가능
+INCR rate_limit:user:123:20241224:1000
+EXPIRE rate_limit:user:123:20241224:1000 60
+```
+
+### Fixed Window의 치명적 단점: Burst 문제
+
+Fixed Window의 가장 큰 문제는 **윈도우 경계에서 발생하는 Burst Traffic**이다.
+
+```kotlin
+// 설정: 100 requests per minute
+
+Timeline:
+10:00:59.000 (Window 1의 마지막 1초)
+  - 100개 요청 → 모두 허용 ✅
+  
+10:01:00.000 (Window 2의 시작)
+  - 카운터 리셋! 0으로 돌아감
+  - 100개 요청 → 모두 허용 ✅
+
+결과: 2초 만에 200개! 💥
+실제 부하: 분당 200개 (설정의 2배!)
+```
+
+**Token Bucket과의 비교:**
+
+```kotlin
+// Token Bucket의 경우
+10:00:59 - 100개 소진 → 토큰 0
+10:01:00 - 1초 지남 → 1.67개만 리필
+         - 1개 허용 ✅, 99개 거부 ❌
+// 점진적 리필로 Burst 방지!
+
+// Fixed Window의 경우
+10:00:59 - 100개 소진 → counter = 100
+10:01:00 - 새 윈도우 → counter = 0 (리셋!)
+         - 100개 모두 허용 ✅
+// 급격한 리셋으로 Burst 발생!
+```
+
+### Fixed Window vs Token Bucket 실전 비교
+
+```kotlin
+// 테스트 시나리오: 2 per second
+
+// Fixed Window
+repeat(2) { fixedLimiter.tryAcquire(...) }  // ✅ ✅
+// ... 1초 대기 (새 윈도우)
+repeat(2) { fixedLimiter.tryAcquire(...) }  // ✅ ✅ (즉시 2개 허용)
+
+// Token Bucket  
+repeat(2) { tokenLimiter.tryAcquire(...) }  // ✅ ✅
+// ... 1초 대기 (2개 리필)
+repeat(2) { tokenLimiter.tryAcquire(...) }  // ✅ ✅ (2개 허용)
+
+// 차이점:
+// Fixed: 윈도우 경계에서 급격한 리셋
+// Token: 점진적 리필로 부드러운 제어
+```
+
+### 사용 권장 사항
+
+**Fixed Window를 사용해도 되는 경우:**
+- 정확한 윈도우 경계가 중요한 경우 (예: 매 시 정각 리셋)
+- 구현 단순성이 최우선인 경우
+- Burst traffic이 큰 문제가 되지 않는 경우
+- 윈도우 크기가 큰 경우 (1시간, 1일)
+
+**Token Bucket을 사용해야 하는 경우:**
+- Burst traffic 방어가 중요한 경우
+- 점진적이고 부드러운 제어가 필요한 경우
+- 일시적 트래픽 증가를 허용하고 싶은 경우
+- 짧은 윈도우 (초 단위)를 사용하는 경우
+
+### 테스트
+
+```kotlin
+@Test
+fun `should reset counter on new window`() = runTest {
+    val limiter = FixedWindowRateLimiter(InMemoryStorage())
+    
+    // Window 1: 3개 소진
+    repeat(3) {
+        assertTrue(limiter.tryAcquire(RequestKey("test"), 3.per.second))
+    }
+    
+    // Window 1: 4번째 거부
+    assertFalse(limiter.tryAcquire(RequestKey("test"), 3.per.second))
+    
+    // 다음 윈도우까지 대기
+    delay(1100)
+    
+    // Window 2: 카운터 리셋, 다시 3개 허용
+    repeat(3) {
+        assertTrue(limiter.tryAcquire(RequestKey("test"), 3.per.second))
+    }
+}
+
+@Test
+fun `should demonstrate burst problem`() = runTest {
+    val limiter = FixedWindowRateLimiter(InMemoryStorage())
+    val key = RequestKey("burst")
+    val config = 10.per.second
+    
+    // Window 끝에서 10개 소진
+    repeat(10) { limiter.tryAcquire(key, config) }
+    
+    // 다음 윈도우
+    delay(1000)
+    
+    // 즉시 10개 더 허용 (Burst!)
+    repeat(10) { i ->
+        assertTrue(limiter.tryAcquire(key, config), "Request $i should be allowed")
+    }
+    
+    // 결과: 2초 만에 20개! (limit의 2배)
+}
+```
+
 ### Token Bucket vs 다른 알고리즘
 
 **Fixed Window Counter**
@@ -132,7 +413,7 @@ when (result) {
 - 장점: 정확한 rate limiting
 - 단점: 메모리 사용량이 많음 (모든 요청 기록)
 
-**Token Bucket (본 프로젝트)**
+**Token Bucket**
 - 장점: 메모리 효율적 (토큰 수와 시간만 저장)
 - 장점: 일시적인 burst 허용 (버킷에 토큰이 쌓여있으면)
 - 장점: 구현이 비교적 간단

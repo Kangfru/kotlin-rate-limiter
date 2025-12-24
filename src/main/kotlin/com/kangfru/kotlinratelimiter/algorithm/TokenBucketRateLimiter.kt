@@ -3,9 +3,9 @@ package com.kangfru.kotlinratelimiter.algorithm
 import com.kangfru.kotlinratelimiter.core.RateLimiter
 import com.kangfru.kotlinratelimiter.domain.RateLimitConfig
 import com.kangfru.kotlinratelimiter.domain.RateLimitResult
+import com.kangfru.kotlinratelimiter.domain.RateLimitState
 import com.kangfru.kotlinratelimiter.domain.RequestKey
 import com.kangfru.kotlinratelimiter.storage.RateLimitStorage
-import com.kangfru.kotlinratelimiter.storage.TokenBucketState
 import java.time.Duration
 import java.time.Instant
 import kotlin.math.min
@@ -23,10 +23,10 @@ class TokenBucketRateLimiter(
             if (tryAcquire(key, config)) {
                 // 허용되면 block() 실행 후 Allowed 반환
                 val result = block()
-                val state = storage.get(key.value) ?: throw IllegalStateException("State not found after successful acquire")
+                val state = storage.get(key.value) as? RateLimitState.TokenBucket ?: throw IllegalStateException("State not found after successful acquire")
                 RateLimitResult.Allowed(result, state.tokens.toLong(), state.lastRefillTime.plus(config.window))
             } else {
-                val state = storage.get(key.value) ?: throw IllegalStateException("State not found after failed acquire")
+                val state = storage.get(key.value) as? RateLimitState.TokenBucket ?: throw IllegalStateException("State not found after failed acquire")
                 RateLimitResult.Denied(calculateRetryAfter(state.lastRefillTime, config), config.limit)
             }
         } catch (e: Exception) {
@@ -39,11 +39,11 @@ class TokenBucketRateLimiter(
         config: RateLimitConfig,
     ): Boolean {
         val now = Instant.now()
-        val state = storage.get(key.value)
+        val state = storage.get(key.value) as? RateLimitState.TokenBucket
 
         return if (state == null) {
             storage.save(
-                key.value, TokenBucketState(
+                key.value, RateLimitState.TokenBucket(
                     tokens = config.limit - 1.0,
                     lastRefillTime = now
                 )
@@ -60,7 +60,7 @@ class TokenBucketRateLimiter(
             if (currentTokens >= 1.0) {
                 // 4. 토큰 있으면
                 storage.save(
-                    key.value, TokenBucketState(
+                    key.value, RateLimitState.TokenBucket(
                         tokens = currentTokens - 1.0,
                         lastRefillTime = now
                     )
