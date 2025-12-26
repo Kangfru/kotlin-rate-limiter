@@ -14,4 +14,14 @@ sealed interface RateLimitState {
         val windowStart: Instant
     ) : RateLimitState
 
+    data class SlidingWindowLog(
+        val logs: List<Instant>
+    ) : RateLimitState
+
+    data class SlidingWindowCounter(
+        val currentWindowStart: Instant,
+        val currentWindowCount: Long,
+        val previousWindowCount: Long,
+    ) : RateLimitState
+
 }
